@@ -1,0 +1,114 @@
+# Production stack for the Azure VM (local dev keeps using docker-compose.yml).
+#
+#   cd ~/etl && docker compose --env-file .env -f docker/docker-compose.prod.yml up -d --build
+#
+# Differences from local:
+#   * Airflow on Postgres + LocalExecutor (not `standalone`/SQLite) — real
+#     parallel tasks, stable admin user, survives restarts.
+#   * webserver clears its stale pid on every start (the "UI won't load" issue).
+#   * 8000/8080 bound to localhost only; Caddy serves the API over HTTPS on 443
+#     and the Airflow UI over HTTPS on 8443 (open 8443 in the VM's NSG).
+# Needs in .env: AIRFLOW_DB_PASSWORD, AIRFLOW_FERNET_KEY,
+# AIRFLOW_WEBSERVER_SECRET_KEY, AIRFLOW_ADMIN_USER, AIRFLOW_ADMIN_PASSWORD,
+# API_DOMAIN (see DEPLOY steps).
+
+x-airflow-common: &airflow-common
+  build: { context: ., dockerfile: Dockerfile }
+  image: etl-airflow:latest
+  restart: unless-stopped
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD}@postgres:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+    # show every time in the Airflow UI / task logs in India time (IST)
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: "Asia/Kolkata"
+    AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: "Asia/Kolkata"
+    # UI is served publicly by Caddy at https://<API_DOMAIN>:8443 — trust its
+    # X-Forwarded-* headers so logins/redirects stay on https
+    AIRFLOW__WEBSERVER__BASE_URL: "https://${API_DOMAIN}:8443"
+    AIRFLOW__WEBSERVER__ENABLE_PROXY_FIX: "True"
+    # the upload API triggers DAG runs via the REST API with basic auth
+    AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
+    PYTHONPATH: "/opt/etl"
+    # this is the ONE Airflow that runs the nightly 01:00 IST qcom schedules
+    ETL_ENABLE_SCHEDULES: "true"
+  volumes:
+    - ../dags:/opt/airflow/dags
+    - ../api:/opt/etl/api:ro
+    - ../engine:/opt/etl/engine:ro
+    - ../config:/opt/etl/config:ro
+    - ../core:/opt/etl/core:ro
+    - ../secrets:/opt/etl/secrets:ro          # BigQuery service-account key (git-ignored)
+    - ../sql:/opt/etl/sql:ro
+    - ../.env:/opt/airflow/.env:ro          # MySQL + Azure creds (read by pydantic settings)
+    - ../logs:/opt/etl/logs                 # consolidated ETL log file
+    - airflow_logs:/opt/airflow/logs        # task logs, shared by scheduler + webserver
+
+services:
+  postgres:                                 # Airflow's own metadata DB (business data stays in MySQL)
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: "${AIRFLOW_DB_PASSWORD}"
+      POSTGRES_DB: airflow
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U airflow"], interval: 10s, retries: 5 }
+
+  airflow-init:                             # one-shot: create Airflow tables + admin user, then exit
+    <<: *airflow-common
+    restart: "no"
+    command: version
+    environment:
+      <<: *airflow-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD}
+    depends_on: { postgres: { condition: service_healthy } }
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: bash -c "rm -f /opt/airflow/airflow-webserver*.pid && exec airflow webserver"
+    ports: ["127.0.0.1:8080:8080"]          # not public — use an SSH tunnel
+    healthcheck: { test: ["CMD", "curl", "--fail", "http://localhost:8080/health"], interval: 30s, retries: 5 }
+    depends_on: { airflow-init: { condition: service_completed_successfully } }
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on: { airflow-init: { condition: service_completed_successfully } }
+
+  etl-api:
+    build: { context: .., dockerfile: docker/api.Dockerfile }
+    image: etl-api:latest
+    restart: unless-stopped
+    ports: ["127.0.0.1:8000:8000"]          # only Caddy talks to it
+    environment: { PYTHONPATH: "/app" }
+    volumes:
+      - ../api:/app/api:ro
+      - ../engine:/app/engine:ro
+      - ../config:/app/config:ro
+      - ../core:/app/core:ro
+      - ../secrets:/app/secrets:ro             # BigQuery service-account key (git-ignored)
+      - ../.env:/app/.env:ro
+      - ../logs:/opt/etl/logs
+
+  caddy:                                    # public HTTPS with a free auto-renewed certificate
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "8443:8443"]   # 8443 = Airflow UI over HTTPS
+    environment: { API_DOMAIN: "${API_DOMAIN}" }
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [etl-api]
+
+volumes:
+  postgres_data: {}
+  airflow_logs: {}
+  caddy_data: {}
+  caddy_config: {}

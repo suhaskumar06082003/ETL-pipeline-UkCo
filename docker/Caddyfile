@@ -1,0 +1,15 @@
+# Public HTTPS for the upload API. Caddy gets + renews the certificate itself.
+# API_DOMAIN comes from .env (e.g. etl-hangyo.centralindia.cloudapp.azure.com).
+{$API_DOMAIN} {
+    reverse_proxy etl-api:8000 {
+        # upload returns a live stream (one event per stage): send every chunk
+        # to the client immediately, never buffer
+        flush_interval -1
+    }
+}
+
+# Airflow UI over HTTPS on port 8443 (same domain, same free certificate).
+# Protected by the Airflow login (AIRFLOW_ADMIN_USER / AIRFLOW_ADMIN_PASSWORD).
+{$API_DOMAIN}:8443 {
+    reverse_proxy airflow-webserver:8080
+}

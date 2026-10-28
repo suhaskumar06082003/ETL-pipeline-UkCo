@@ -1,0 +1,70 @@
+# Full ETL stack in Docker (no local venv needed):
+#   etl-api      -> FastAPI ingestion API   (http://localhost:8000)
+#   etl-airflow  -> Airflow (DAGs)          (http://localhost:8080)
+# Both reach host MySQL (naturo) via host.docker.internal and Azure via .env.
+#
+#   docker compose -f docker/docker-compose.yml up -d --build
+#
+services:
+  etl-api:
+    build:
+      context: ..
+      dockerfile: docker/api.Dockerfile
+    image: etl-api:latest
+    container_name: etl_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      PYTHONPATH: "/app"
+      # MYSQL_HOST comes from .env (single dev-server host for all DBs) — no override
+    volumes:
+      - ../api:/app/api:ro                     # code (live-mounted)
+      - ../engine:/app/engine:ro               # code (live-mounted)
+      - ../config:/app/config:ro               # code (live-mounted)
+      - ../core:/app/core:ro                   # reusable core package (import core)
+      - ../secrets:/app/secrets:ro             # BigQuery service-account key (git-ignored)
+      - ../.env:/app/.env:ro                   # Azure + MySQL creds
+      - ../logs:/opt/etl/logs                  # consolidated ETL log file (host: D:\etl\logs)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  etl-airflow:
+    build:
+      context: .
+    image: etl-airflow:latest
+    container_name: etl_airflow
+    command: standalone
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      # show every time in the Airflow UI / task logs in India time (IST)
+      AIRFLOW__CORE__DEFAULT_TIMEZONE: "Asia/Kolkata"
+      AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: "Asia/Kolkata"
+      # allow the API to trigger DAG runs via the REST API with basic auth
+      AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
+      # make `import api/engine/config/core` work inside the container
+      PYTHONPATH: "/opt/etl"
+      # local dev: NO nightly schedules — the Azure VM runs them. Locally the
+      # DAGs still load and can be triggered by hand, but never start on their
+      # own (no 01:00 runs, no "missed night" catch-up when the PC starts).
+      ETL_ENABLE_SCHEDULES: "false"
+      # MYSQL_HOST comes from .env (single dev-server host for all DBs) — no override
+    volumes:
+      - ../dags:/opt/airflow/dags
+      - ../api:/opt/etl/api:ro
+      - ../engine:/opt/etl/engine:ro
+      - ../config:/opt/etl/config:ro
+      - ../core:/opt/etl/core:ro
+      - ../secrets:/opt/etl/secrets:ro        # BigQuery service-account key (git-ignored)
+      - ../sql:/opt/etl/sql:ro
+      - ../.env:/opt/airflow/.env:ro          # Azure + MySQL creds (read by pydantic settings)
+      - ../logs:/opt/etl/logs                 # consolidated ETL log file (host: D:\etl\logs)
+      - airflow_data:/opt/airflow
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  airflow_data:

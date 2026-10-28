@@ -1,0 +1,33 @@
+# Secrets — never commit
+.env
+# Google Cloud service-account key (secrets/gcp-key.json) etc.
+secrets/
+*service-account*.json
+*gcp-key*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Runtime state (metadata JSON, local parquet, etc.)
+data/
+*.parquet
+
+# Logs
+logs/
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Reference-only copy of the old project — never deploy/commit
+retailverse/

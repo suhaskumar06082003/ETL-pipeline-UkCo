@@ -1,0 +1,31 @@
+# ── Ingestion API ──
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+pydantic-settings==2.7.1
+
+# ── Extract / transform ──
+pandas==2.2.3
+openpyxl==3.1.5
+chardet==5.2.0
+pyarrow==18.1.0            # Parquet read/write (fast downstream reads)
+XlsxWriter==3.2.0          # Excel template writer (same engine as retailverse)
+deep-translator==1.11.4    # translate local-language state names to English
+
+# ── Load: raw zone (Azure Blob) ──
+azure-storage-blob==12.24.0
+
+# ── Analytics warehouse (BigQuery) ──
+google-cloud-bigquery==3.27.0
+
+# ── Load: destination (MySQL) ──
+SQLAlchemy==2.0.36
+PyMySQL==1.1.1
+
+# ── Tests ──
+pytest==8.3.4
+httpx==0.28.1
+
+# NOTE: Apache Airflow is NOT listed here on purpose — install it in its own
+# environment (its dependency pins conflict with app deps). The DAGs in dags/
+# import the etl_project pipeline package.

@@ -1,0 +1,68 @@
+# CI/CD: every push to main is checked, and if the checks pass it is deployed
+# to the Azure VM automatically.
+#
+#   ci      runs on GitHub's machine: every Python file must compile and the
+#           production docker-compose file must be valid. Any error -> stop.
+#   deploy  runs ON the Azure VM through a self-hosted runner (the VM's SSH is
+#           locked to one IP, so GitHub can't SSH in; the runner calls out to
+#           GitHub instead). Pulls main, rebuilds images if their inputs
+#           changed, restarts what needs it.
+#
+# Avoid pushing around 1 AM IST: restarting the scheduler stops a running
+# nightly pipeline (re-running it is safe — every load is idempotent).
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}          # also allow a manual "Run workflow" button
+
+concurrency:
+  group: deploy-vm
+  cancel-in-progress: false      # never cut a deploy in half
+
+jobs:
+  ci:
+    name: Check code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Every Python file compiles
+        run: python -m compileall -q api config core dags engine
+
+      - name: Production docker-compose file is valid
+        run: |
+          touch .env                      # real .env lives only on the VM
+          docker compose -f docker/docker-compose.prod.yml config --quiet
+
+  deploy:
+    name: Deploy to Azure VM
+    needs: ci                    # only runs if every check above passed
+    runs-on: self-hosted
+    steps:
+      - name: Pull latest code
+        run: |
+          cd ~/etl
+          git pull --ff-only
+
+      - name: Rebuild (if needed) and restart
+        run: |
+          cd ~/etl
+          DC="docker compose --env-file .env -f docker/docker-compose.prod.yml"
+          $DC up -d --build
+          # code is mounted, not baked in: restart the long-running processes
+          # so they load the new code (the API has no auto-reload)
+          $DC restart etl-api airflow-scheduler
+          # pick up Caddyfile changes without dropping connections
+          $DC exec -T caddy caddy reload --config /etc/caddy/Caddyfile
+
+      - name: Show status
+        run: |
+          cd ~/etl
+          docker compose --env-file .env -f docker/docker-compose.prod.yml ps
